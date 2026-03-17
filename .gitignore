@@ -1,6 +1,8 @@
 # Dependencies
 node_modules/
 .pnpm-store/
+pnpm-lock.yaml
+package-lock.json
 
 # Build outputs
 dist/
@@ -37,6 +39,17 @@ backend/prisma/*.db-journal
 # Cloud Studio
 .cloudstudio/
 
+# Codebuddy
+.codebuddy/
+.genie/
+.templates/
+
 # Temporary files
 *.tmp
 *.temp
+
+# Docs extras
+docs/design/
+docs/posters/
+docs/pages.json
+docs/project.json
