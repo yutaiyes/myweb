@@ -1,0 +1,334 @@
+// Prisma Schema for Domain Management System
+// PostgreSQL database with TypeScript ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// 枚举类型
+// ============================================
+
+// 用户角色
+enum Role {
+  VIEWER       // 查看者 - 查看有权限的域名
+  ADMIN        // 管理员 - 管理权限范围内的域名
+  SUPER_ADMIN  // 超级管理员 - 全局权限
+}
+
+// 域名状态
+enum DomainStatus {
+  ACTIVE       // 正常
+  EXPIRING     // 即将到期（到期前40天内）
+  EXPIRED      // 已过期
+}
+
+// 提醒频率
+enum ReminderFrequency {
+  DAILY
+  WEEKLY
+}
+
+// 同步状态
+enum SyncStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+// 同步类型
+enum SyncType {
+  REGISTRAR    // 注册商同步
+  CLOUDFLARE   // Cloudflare 同步
+}
+
+// ============================================
+// 核心模型
+// ============================================
+
+// 用户表 - ID 与 Supabase Auth 用户 ID 对应
+model User {
+  id        String      @id                    // Supabase Auth UUID
+  email     String      @unique
+  name      String?
+  role      Role        @default(VIEWER)
+  groupId   String?     @map("group_id")
+  group     AdminGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  // 关联
+  auditLogs AuditLog[]
+
+  @@index([email])
+  @@index([groupId])
+  @@map("users")
+}
+
+// 管理组 - 用于隔离不同管理员的域名权限
+model AdminGroup {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // 关联
+  users   User[]
+  domains Domain[]
+
+  @@map("admin_groups")
+}
+
+// 注册商 - 域名注册服务提供商
+model Registrar {
+  id          String   @id @default(cuid())
+  name        String                         // aliyun, qcloud, west.cn, spaceship
+  displayName String   @map("display_name")  // 显示名称
+  website     String?
+  isEnabled   Boolean  @default(true) @map("is_enabled")
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // 关联
+  accounts RegistrarAccount[]
+  domains  Domain[]
+
+  @@unique([name])
+  @@map("registrars")
+}
+
+// 注册商账号 - API 凭据配置
+model RegistrarAccount {
+  id           String     @id @default(cuid())
+  registrarId  String     @map("registrar_id")
+  registrar    Registrar  @relation(fields: [registrarId], references: [id], onDelete: Cascade)
+  displayName  String     @map("display_name")  // 区分不同账号
+  credentials  Json                             // 加密存储 API 凭据
+  groupId      String?    @map("group_id")      // 权限范围（可选）
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  // 关联
+  domains Domain[]
+
+  @@index([registrarId])
+  @@index([groupId])
+  @@map("registrar_accounts")
+}
+
+// Cloudflare 配置 - 全局单一配置
+model CloudflareConfig {
+  id        String   @id @default(cuid())
+  apiToken  String   @map("api_token") @db.Text  // 加密存储
+  accountId String?  @map("account_id")
+  isEnabled Boolean  @default(true) @map("is_enabled")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("cloudflare_configs")
+}
+
+// 域名 - 核心实体
+model Domain {
+  id                  String        @id @default(cuid())
+  name                String        @unique
+
+  // 注册商关联
+  registrarId         String?       @map("registrar_id")
+  registrar           Registrar?    @relation(fields: [registrarId], references: [id], onDelete: SetNull)
+  registrarAccountId  String?       @map("registrar_account_id")
+  registrarAccount    RegistrarAccount? @relation(fields: [registrarAccountId], references: [id], onDelete: SetNull)
+
+  // Cloudflare 关联
+  cfZoneId            String?       @map("cf_zone_id")
+  cfZoneName          String?       @map("cf_zone_name")
+
+  // 时间信息
+  registrationDate    DateTime?     @map("registration_date")
+  expirationDate      DateTime?     @map("expiration_date")
+
+  // 状态
+  status              DomainStatus  @default(ACTIVE)
+
+  // 管理组
+  groupId             String?       @map("group_id")
+  group               AdminGroup?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  // 提醒配置
+  reminderDays        Int           @default(30) @map("reminder_days")
+
+  // 备注
+  notes               String?       @db.Text
+
+  // 同步状态
+  lastSyncAt          DateTime?     @map("last_sync_at")
+  syncStatus          SyncStatus?   @map("sync_status")
+  syncError           String?       @map("sync_error") @db.Text
+
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  // 关联
+  dnsRecords       DnsRecord[]
+  reminders        ExpiryReminder[]
+  visibilityRules  AnonymousVisibilityRule[]
+  syncLogs         SyncLog[]
+
+  @@index([name])
+  @@index([status])
+  @@index([expirationDate])
+  @@index([groupId])
+  @@index([registrarId])
+  @@map("domains")
+}
+
+// DNS 解析记录
+model DnsRecord {
+  id         String   @id @default(cuid())
+  domainId   String   @map("domain_id")
+  domain     Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  // 记录信息
+  recordType String   @map("record_type")  // A, AAAA, CNAME, MX, TXT, NS, SRV 等
+  name       String                         // 子域名（如 www, @, *）
+  content    String                         // 记录值
+  ttl        Int      @default(3600)
+  priority   Int?                          // MX/SRV 优先级
+  proxied    Boolean  @default(false)       // 是否开启 Cloudflare 代理
+
+  // Cloudflare 记录 ID
+  cfRecordId String?  @map("cf_record_id")
+
+  // 状态
+  isActive   Boolean  @default(true) @map("is_active")
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([domainId, name, recordType])
+  @@index([domainId])
+  @@index([recordType])
+  @@map("dns_records")
+}
+
+// 到期提醒
+model ExpiryReminder {
+  id           String    @id @default(cuid())
+  domainId     String    @map("domain_id")
+  domain       Domain    @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  // 提醒时间
+  remindAt     DateTime  @map("remind_at")      // 计划提醒时间
+  daysBefore   Int       @map("days_before")    // 提前天数
+
+  // 发送状态
+  isSent       Boolean   @default(false) @map("is_sent")
+  sentAt       DateTime? @map("sent_at")
+
+  // 关闭状态（续费后自动关闭）
+  isClosed     Boolean   @default(false) @map("is_closed")
+  closedAt     DateTime? @map("closed_at")
+  closedReason String?   @map("closed_reason")
+
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([domainId])
+  @@index([remindAt])
+  @@index([isSent, isClosed])
+  @@map("expiry_reminders")
+}
+
+// 匿名展示规则 - 控制匿名用户可见的域名
+model AnonymousVisibilityRule {
+  id         String   @id @default(cuid())
+  domainId   String   @map("domain_id")
+  domain     Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  // 隐藏配置
+  isHidden   Boolean  @default(true) @map("is_hidden")
+
+  // 创建者
+  createdBy  String   @map("created_by")    // 用户 ID
+
+  // 超管裁决
+  isOverride Boolean  @default(false) @map("is_override")
+  overrideBy String?  @map("override_by")   // 超管用户 ID
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([domainId, createdBy])
+  @@index([domainId])
+  @@index([createdBy])
+  @@map("anonymous_visibility_rules")
+}
+
+// 同步日志 - 记录注册商和 Cloudflare 同步状态
+model SyncLog {
+  id        String    @id @default(cuid())
+  domainId  String?   @map("domain_id")
+  domain    Domain?   @relation(fields: [domainId], references: [id], onDelete: SetNull)
+
+  // 同步信息
+  type      SyncType
+  status    SyncStatus
+  message   String?   @db.Text
+  details   Json?              // 详细信息
+
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([domainId])
+  @@index([type, status])
+  @@index([createdAt])
+  @@map("sync_logs")
+}
+
+// 邮件通知配置
+model EmailNotificationConfig {
+  id              String           @id @default(cuid())
+  name            String                                // 配置名称
+  recipientEmails Json                                  // 收件人邮箱列表 ["email1", "email2"]
+  frequency       ReminderFrequency @default(DAILY)
+  isEnabled       Boolean           @default(true) @map("is_enabled")
+
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  @@map("email_notification_configs")
+}
+
+// 审计日志 - 记录关键操作
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+
+  // 操作信息
+  action     String                          // CREATE, UPDATE, DELETE, SYNC, OVERRIDE 等
+  resource   String                          // Domain, Registrar, DnsRecord 等
+  resourceId String?  @map("resource_id")
+  details    Json?                           // 详细变更信息
+
+  // IP 和 User-Agent
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent") @db.Text
+
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  // 关联
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([resource, resourceId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

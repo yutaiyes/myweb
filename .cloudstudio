@@ -1,0 +1,11 @@
+[[app]]
+name = "frontend"
+cmd = "cd frontend && pnpm install && pnpm run dev"
+autoRun = true
+port = 5173
+
+[[app]]
+name = "backend"
+cmd = "cd backend && pnpm install && pnpm run prisma:generate && pnpm run dev"
+autoRun = true
+port = 3000
